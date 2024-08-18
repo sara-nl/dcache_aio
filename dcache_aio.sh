@@ -174,7 +174,8 @@ if [ -f "$dcache_basename" ]; then
     echo "The file $dcache_basename already exists. Skipping download."
 else
     echo "Downloading $dcache_basename..."
-    curl -O $dcache_rpm
+    curl -s -w "%{http_code}\n" -L $dcache_rpm -O
+
     if [ $? -eq 0 ]; then
         echo "Download completed successfully."
     else
