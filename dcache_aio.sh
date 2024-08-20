@@ -14,9 +14,8 @@
 # Tested on AlmaLinux 9.2
 # minimal 2 cpu and 2GB memory
 
-# DON'T RUN THIS ON A PRODUCTION SERVER!
 # Use on a test system only, at your own risk!
-
+# DON'T RUN THIS ON A PRODUCTION SERVER!
 
 # Default values for variables
 DATADIR=""
