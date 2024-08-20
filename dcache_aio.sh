@@ -151,8 +151,7 @@ else
 fi
 
 
-
-# URL for the specific page where to find the latest dcache
+# URL for the specific page where to find the latest dCache
 URL="https://www.dcache.org/old/downloads/1.9/index.shtml"
 
 echo "Fetching the downloads page with lynx..."
@@ -187,38 +186,25 @@ fi
 required_jvm_version=$(echo "$page_content" | grep -oP 'dCache v[0-9]+\.[0-9]+ requires a JVM supporting Java [0-9]+' | grep -oP '[0-9]+$' | head -1)
 
 # Determine the corresponding OpenJDK package
-if [ "$required_jvm_version" -eq 17 ]; then
-    jvm_package="openjdk-17-jdk (or java-17-openjdk-devel)"
-elif [ "$required_jvm_version" -eq 11 ]; then
-    jvm_package="openjdk-11-jdk (or java-11-openjdk-devel)"
-else
-    jvm_package="Unknown, will attempt to install the latest version available"
-fi
-
 if [ -z "$required_jvm_version" ]; then
     echo "No specific JVM version required. Installing the latest version of OpenJDK."
-    sudo apt-get install -y openjdk-17-jdk || sudo yum install -y java-17-openjdk-devel
+    sudo yum install -y java-latest-openjdk-devel
 else
     echo "Required JVM version: Java $required_jvm_version"
-    echo "Corresponding OpenJDK package: $jvm_package"
 
-    #  Check if the required JVM version is installed
+    # Check if the required JVM version is installed
     if java -version 2>&1 | grep -q "openjdk version \"$required_jvm_version\""; then
         echo "Java $required_jvm_version is already installed."
     else
         echo "Java $required_jvm_version is not installed. Installing it now..."
-        if [ "$required_jvm_version" -eq 17 ]; then
-            sudo apt-get install -y openjdk-17-jdk || sudo yum install -y java-17-openjdk-devel
-        elif [ "$required_jvm_version" -eq 11 ]; then
-            sudo apt-get install -y openjdk-11-jdk || sudo yum install -y java-11-openjdk-devel
-        else
-            echo "The required JVM version $required_jvm_version is not available. Installing the latest version of OpenJDK."
-            sudo apt-get install -y openjdk-17-jdk || sudo yum install -y java-17-openjdk-devel
-        fi
+        sudo yum install -y java-$required_jvm_version-openjdk-devel
     fi
 fi
 
 echo "JVM setup is complete."
+
+
+
 
 
 # Install httpd-tools
