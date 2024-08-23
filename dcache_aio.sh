@@ -89,7 +89,7 @@ echo "DATADIR is set to: $DATADIR"
 echo "PASSWD is set to: $PASSWD"
 
 # Set locales for postgres dbinit
-dnf install glibc-locale-source glibc-langpack-en
+dnf install -y glibc-locale-source glibc-langpack-en
 LANG_LOCALE="C.UTF-8"
 LC_ALL_LOCALE="C.UTF-8"
 echo "Set correct locales for postgres dbinit"
