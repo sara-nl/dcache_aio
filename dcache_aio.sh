@@ -25,6 +25,7 @@ function show_help {
     echo
     echo "Usage: $0 --datadir=<directory> --passwd=<password>"
     echo "  --datadir=DIR   Specify the data directory."
+    echo "  --hsmbase=DIR   Specify a fake tape backend filesystem (not same as datadir)"
     echo "  --passwd=PASS   Specify the password."
     echo
     echo "Both --datadir and --passwd are required."
@@ -36,6 +37,7 @@ function show_help {
 
 # Initializing default values for variables
 DATADIR=""
+HSMBASE='/fake-tape-filesystem'
 PASSWD=""
 
 # Parse command line arguments
@@ -44,6 +46,10 @@ do
     case $arg in
         --datadir=*)
         DATADIR="${arg#*=}"
+        shift
+        ;;
+        --hsmbase=*)
+        HSMBASE="${arg#*=}"
         shift
         ;;
         --passwd=*)
@@ -88,6 +94,18 @@ while [ -z "$DATADIR" ] || [ ! -d "$DATADIR" ] ; do
   fi
 done
 
+# Prompt for HSMBASE until it's not empty and exists
+while [ -z "$HSMBASE" ] || [ ! -d "$HSMBASE" ] || [ "$HSMBASE" == "$DATADIR" ] ; do
+  read -r -p "Enter HSMBASE (must be an existing directory, not the same as DATADIR): " HSMBASE
+  if [ -z "$HSMBASE" ]; then
+    echo "DATADIR cannot be empty."
+  elif [ ! -d "$HSMBASE" ]; then
+    echo "Directory '$HSMBASE' does not exist."
+  elif [ "$HSMBASE" == "$DATADIR" ]; then
+    echo "Directory HSMBASE should not be the same as DATADIR."
+  fi
+done
+
 # Prompt for PASSWD until it's not empty
 while [ -z "$PASSWD" ]; do
   read -rp "Enter PASSWD (cannot be empty): " PASSWD
@@ -99,6 +117,7 @@ done
 
 # Display the values
 echo "DATADIR is set to: $DATADIR"
+echo "HSMBASE is set to: $HSMBASE"
 echo "PASSWD is set to: $PASSWD"
 
 
@@ -247,7 +266,7 @@ function db_exists {
 
 # Variables
 PG_USER="dcache"
-PG_DB="chimera"
+PG_DB="chimera pinmanager bulk"
 
 # Check and create PostgreSQL user
 if user_exists "$PG_USER"; then
@@ -259,13 +278,15 @@ else
 fi
 
 # Check and create PostgreSQL database
-if db_exists "$PG_DB"; then
-    echo "Database '$PG_DB' already exists. Skipping database creation."
-else
-    echo "Creating PostgreSQL database '$PG_DB'..."
-    su - postgres -c "createdb $PG_DB"
-    echo "Database '$PG_DB' created successfully."
-fi
+for database in $PG_DB ; do
+  if db_exists "$database"; then
+    echo "Database '$database' already exists. Skipping database creation."
+  else
+    echo "Creating PostgreSQL database '$database'..."
+    su - postgres -c "createdb $database"
+    echo "Database '$database' created successfully."
+  fi
+done
 
 # Alter user to have superuser privileges
 echo "Altering user '$PG_USER' to have SUPERUSER privileges..."
@@ -274,6 +295,10 @@ echo "User '$PG_USER' altered successfully."
 
 echo "PostgreSQL configuration completed."
 
+
+
+echo "Writing dCache configuration files."
+echo "  /etc/dcache/dcache.conf"
 # dCache configuration
 if [ -f /etc/dcache/dcache.conf ]; then
     if ! grep --silent 'dcache.layout' /etc/dcache/dcache.conf ; then
@@ -281,8 +306,10 @@ if [ -f /etc/dcache/dcache.conf ]; then
     fi
 fi
 
+echo "  /etc/dcache/layouts/mylayout.conf"
 cat <<'EOF' >/etc/dcache/layouts/mylayout.conf
 dcache.enable.space-reservation = false
+dcache.log.destination=file
 
 [dCacheDomain]
  dcache.broker.scheme = none
@@ -292,14 +319,21 @@ dcache.enable.space-reservation = false
  pnfsmanager.default-retention-policy = REPLICA
  pnfsmanager.default-access-latency = ONLINE
 
-[dCacheDomain/cleaner-disk]
 [dCacheDomain/poolmanager]
+[dCacheDomain/pinmanager]
 [dCacheDomain/billing]
+[dCacheDomain/cleaner-disk]
 [dCacheDomain/gplazma]
 [dCacheDomain/webdav]
+ webdav.authn.protocol = https
  webdav.authn.basic = true
+
+[dCacheDomain/frontend]
+[dCacheDomain/bulk]
+
 EOF
 
+echo "  /etc/dcache/gplazma.conf"
 cat <<'EOF' >/etc/dcache/gplazma.conf
 auth     sufficient  htpasswd
 map      sufficient  multimap
@@ -307,31 +341,32 @@ account  requisite   banfile
 session  requisite   authzdb
 EOF
 
+echo "  /etc/dcache/htpasswd"
 touch /etc/dcache/htpasswd
 htpasswd -bm /etc/dcache/htpasswd tester "${PASSWD}"
 htpasswd -bm /etc/dcache/htpasswd admin  "${PASSWD}"
 
+echo "  /etc/dcache/multi-mapfile"
 cat <<'EOF' > /etc/dcache/multi-mapfile
 username:tester uid:1000 gid:1000,true
-username:admin uid:0 gid:0,true
+username:admin  uid:0    gid:0,true
 EOF
 
 touch /etc/dcache/ban.conf
 
-# This is a bit peculiar. In order to start pools you need x509 certificates.
-# Eventhough you don't use them.
+
+echo "Generating self-signed host certificate..."
 mkdir -p /etc/grid-security
 touch /etc/grid-security/hostkey.pem
 touch /etc/grid-security/hostcert.pem
 mkdir -p /etc/grid-security/certificates
-
-# Generate phony key and self-signed certificate to make pools start
 openssl genrsa 2048 > /etc/grid-security/hostkey.pem
 openssl req -x509 -days 1000 -new \
             -subj "/C=NL/ST=Amsterdam/O=SURF/OU=ODS/CN=localhost" \
             -key /etc/grid-security/hostkey.pem \
             -out /etc/grid-security/hostcert.pem
 
+echo "  /etc/grid-security/storage-authzdb"
 cat <<'EOF' > /etc/grid-security/storage-authzdb
 version 2.1
 
@@ -339,19 +374,31 @@ authorize tester read-write 1000 1000 /home/tester /
 authorize admin read-write 0 0 / /
 EOF
 
-# Create pool
+echo "Creating pools"
 mkdir -p "${DATADIR}"
 dcache pool create "${DATADIR}/pool-1" pool1 dCacheDomain
+dcache pool create "/data/tapepool-1" tapepool1 dCacheDomain
 
-# Update dcache databases
+
+echo "Running 'dcache database update' to lay out the database structures."
 dcache database update
 
-# Create directories
+echo "Creating directories in the dCache namespace"
+# Create user home directories
 chimera mkdir /home
 chimera mkdir /home/tester
 chimera chown 1000:1000 /home/tester
+# Create tape test directory
+chimera mkdir /home/tester
+chimera chown 1000:1000 /home/tester/tape
+chimera writetag /home/tester/tape hsmType osm
+chimera writetag /home/tester/tape OSMTemplate 'StoreName generic'
+chimera writetag /home/tester/tape sGroup tape
+chimera writetag /home/tester/tape AccessLatency NEARLINE
+chimera writetag /home/tester/tape RetentionPolicy CUSTODIAL
 
-# Start dcache
+
+echo "Starting dCache..."
 systemctl daemon-reload
 systemctl stop dcache.target
 systemctl start dcache.target
@@ -380,9 +427,66 @@ done
 
 sleep 1
 
-echo -ne "\rDone!                                     \n"
+echo -ne "\rdCache is running!                                     \n"
 
-echo " "
+echo "Configuring admin interface."
+cp /etc/dcache/admin/ssh_host_rsa_key /etc/dcache/admin/dcache_key
+chmod 600 /etc/dcache/admin/dcache_key
+sed -e 's/ root@/ admin@/' /etc/dcache/admin/ssh_host_rsa_key.pub > authorized_keys2
+
+# Create a function to easily access the admin interface
+dcache-admin () {
+  local service="$1"
+  shift
+  local command="$*"
+  ssh -i /etc/dcache/admin/dcache_key admin@localhost -p 22224 "\s $service $command"
+}
+
+# Test it and quit if it doesn't work
+if [[ $(dcache-admin PoolManager help | wc -l) < 10 ]] ; then
+  echo "ERROR: Could not access the admin interface."
+  exit 1
+fi
+echo "Admin interface ready."
+
+echo "Preparing HSM script, for fake tape backend."
+sed -e 's@puts URI.escape("hsm://#{instance}/?store=#{store}&group=#{group}&bfid=#{pnfsid}")@puts "hsm://#{instance}/?store=#{store}&group=#{group}&bfid=#{pnfsid}"@' \
+    -i /usr/share/dcache/lib/hsmcp.rb
+chmod 755 /usr/share/dcache/lib/hsmcp.rb
+echo "Configuring tape pool"
+dcache-admin "tapepool1" "hsm create -command=/usr/share/dcache/lib/hsmcp.rb -pnfs=/pnfs -hsmBase=$HSMBASE -hsmInstance=osm -c:puts=1 -c:gets=1 -c:removes=1 osm"
+# Pool configuration should be saved! Otherwise it vanishes after a restart.
+dcache-admin "tapepool1" "save"
+
+# Configure the tape pool in the PoolManager.
+dcache-admin PoolManager "psu create unit -store generic:tape@osm"
+dcache-admin PoolManager "psu create ugroup tape-ugroup"
+dcache-admin PoolManager "psu addto ugroup tape-ugroup generic:tape@osm"
+dcache-admin PoolManager "psu create pgroup tape-pools"
+dcache-admin PoolManager "psu create link tape-link any-protocol tape-ugroup world-net"
+dcache-admin PoolManager "psu set link tape-link -readpref=10 -writepref=10 -cachepref=10 -p2ppref=-1"
+dcache-admin PoolManager "psu addto link tape-link tape-pools"
+# dCache versions 9 and older need this setting
+dcache-admin PoolManager "pm set -stage-allowed=yes'"
+# In the PoolManager, we don't need to save changes: they are saved into Zookeeper.
+
+echo "Next step: write some PoolManager configuration."
+echo "Here is the default configuration:"
+echo '---------------------------------------------------'
+ssh -i /etc/dcache/admin/dcache_key admin@localhost -p 22224 '\s PoolManager psu dump setup'
+echo '---------------------------------------------------'
+
+echo "Preparing 'tape' directory"
+chown dcache "$HSMBASE"
+chmod 770 "$HSMBASE"
+
+
+echo
 echo "You can test uploading the README.md file with webdav now:"
 echo "curl -v -u tester:$PASSWD -L -T README.md http://localhost:2880/home/tester/README.md"
+echo
 echo "Admin console: ssh -p 22224 admin@localhost (with your provided password $PASSWD)"
+echo
+echo "Getting a macaroon authentication token:"
+echo "curl -u tester:$PASSWD -X POST -H 'Content-Type: application/macaroon-request' -d '{ \"caveats\"  : [ \"path:/home/tester/\", \"activity:DOWNLOAD,LIST,UPLOAD,DELETE,MANAGE,READ_METADATA,UPDATE_METADATA\" ], \"validity\" : \"PT12H\" }' --fail http://localhost:2880/"
+
