@@ -240,6 +240,11 @@ dnf install -y java-17-openjdk-devel.x86_64 ruby
 # Install httpd-tools
 dnf install httpd-tools -y
 
+
+# Install other utilities
+dnf install netcat -y
+
+
 # Install postgresql
 pg_version=17
 if ! rpm -qa | grep --silent postgres ; then
