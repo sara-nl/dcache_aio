@@ -232,6 +232,13 @@ else
 fi
 
 
+# If dCache is already running, stop it
+if systemctl --quiet is-active dcache.target ; then
+    log "dCache is running. Stopping it..."
+    systemctl stop dcache.target
+fi
+
+
 # install java and ruby
 log "install java17 and ruby"
 dnf install -y java-17-openjdk-devel.x86_64 ruby
