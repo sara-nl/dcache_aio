@@ -11,6 +11,9 @@
 # - the data directory (e.g. /home/datadir
 # - the password for the test user
 
+# Optionally, you can specify a directory for a fake tape backend.
+# Without it, no tape backend is set up.
+
 # Tested on AlmaLinux 9.6
 # minimal 2 cpu and 2GB memory
 
@@ -23,13 +26,15 @@ function show_help {
     echo "This script will install a basic dCache instance on a test server."
     echo "Do not run this on a production system!"
     echo
-    echo "Usage: $0 --datadir=<directory> --passwd=<password> --hsmbase=<directory>"
+    echo "Usage: $0 --datadir=<directory> --passwd=<password> [--hsmbase=<directory>]"
     echo "  --datadir=DIR   Specify the data directory."
-    echo "  --hsmbase=DIR   Specify a fake tape backend filesystem (not same as datadir)"
     echo "  --passwd=PASS   Specify the password."
+    echo "  --hsmbase=DIR   Optional: set up a fake tape backend in DIR (not same as datadir)."
+    echo "                  Without it, no tape backend is set up."
     echo
     echo "Both --datadir and --passwd are required."
-    echo "If not provided, you will be prompted to enter them."
+    echo "If not provided, you will be prompted to enter them,"
+    echo "and asked whether you want a fake tape backend."
     echo
     echo "Information about dCache itself can be found at: https://www.dcache.org"
 }
@@ -44,6 +49,7 @@ log() {
 DATADIR=""
 HSMBASE=""
 PASSWD=""
+interactive=false
 
 # Parse command line arguments
 for arg in "$@"
@@ -51,15 +57,12 @@ do
     case $arg in
         --datadir=*)
         DATADIR="${arg#*=}"
-        shift
         ;;
         --hsmbase=*)
         HSMBASE="${arg#*=}"
-        shift
         ;;
         --passwd=*)
         PASSWD="${arg#*=}"
-        shift
         ;;
         --help|-h)
         show_help
@@ -81,6 +84,7 @@ if [ -z "$DATADIR" ] || [ -z "$PASSWD" ]; then
     case $answer in
         [Yy]* )
             echo "Continuing with interactive input..."
+            interactive=true
             ;;
         * )
             echo "Exiting."
@@ -89,31 +93,63 @@ if [ -z "$DATADIR" ] || [ -z "$PASSWD" ]; then
     esac
 fi
 
-# Prompt for DATADIR until it's not empty and exists
-while [ -z "$DATADIR" ] || [ ! -d "$DATADIR" ] ; do
-  read -r -p "Enter DATADIR (must be an existing directory): " DATADIR
+# Prompt for DATADIR until it's not empty and exists (offer to create it)
+while true; do
   if [ -z "$DATADIR" ]; then
-    echo "DATADIR cannot be empty."
-  elif [ ! -d "$DATADIR" ]; then
-    echo "Directory '$DATADIR' does not exist."
+    read -r -p "Enter DATADIR (a directory): " DATADIR
+    [ -z "$DATADIR" ] && echo "DATADIR cannot be empty." && continue
   fi
+  if [ -d "$DATADIR" ]; then
+    break
+  elif [ -e "$DATADIR" ]; then
+    echo "'$DATADIR' exists but is not a directory."
+  else
+    read -r -p "Directory '$DATADIR' does not exist. Create it? (y/n) " answer
+    case $answer in
+      [Yy]* ) mkdir -p "$DATADIR" && break ;;
+    esac
+  fi
+  DATADIR=""
 done
 
+# The fake tape backend is optional. It's set up when --hsmbase is given,
+# or when the user asks for it in interactive mode.
+fake_tape=false
+if [ -n "$HSMBASE" ]; then
+  fake_tape=true
+elif [ "$interactive" = true ]; then
+  read -r -p "Do you want a fake tape backend? (y/n) " answer
+  case $answer in
+    [Yy]* ) fake_tape=true ;;
+  esac
+fi
+
 # Prompt for HSMBASE until it's not empty and exists
-while [ -z "$HSMBASE" ] || [ ! -d "$HSMBASE" ] || [ "$HSMBASE" == "$DATADIR" ] ; do
-  read -r -p "Enter HSMBASE (must be an existing directory, not the same as DATADIR): " HSMBASE
-  if [ -z "$HSMBASE" ]; then
-    echo "DATADIR cannot be empty."
-  elif [ ! -d "$HSMBASE" ]; then
-    echo "Directory '$HSMBASE' does not exist."
-  elif [ "$HSMBASE" == "$DATADIR" ]; then
-    echo "Directory HSMBASE should not be the same as DATADIR."
-  fi
-done
+if [ "$fake_tape" = true ]; then
+  while true; do
+    if [ -z "$HSMBASE" ]; then
+      read -r -p "Enter HSMBASE (a directory, not the same as DATADIR): " HSMBASE
+      [ -z "$HSMBASE" ] && echo "HSMBASE cannot be empty." && continue
+    fi
+    if [ "$HSMBASE" == "$DATADIR" ]; then
+      echo "Directory HSMBASE should not be the same as DATADIR."
+    elif [ -d "$HSMBASE" ]; then
+      break
+    elif [ -e "$HSMBASE" ]; then
+      echo "'$HSMBASE' exists but is not a directory."
+    else
+      read -r -p "Directory '$HSMBASE' does not exist. Create it? (y/n) " answer
+      case $answer in
+        [Yy]* ) mkdir -p "$HSMBASE" && break ;;
+      esac
+    fi
+    HSMBASE=""
+  done
+fi
 
 # Prompt for PASSWD until it's not empty
 while [ -z "$PASSWD" ]; do
-  read -rp "Enter PASSWD (cannot be empty): " PASSWD
+  read -rsp "Enter PASSWD (cannot be empty): " PASSWD
   echo  # for newline
   if [ -z "$PASSWD" ]; then
     echo "PASSWD cannot be empty."
@@ -122,7 +158,11 @@ done
 
 # Display the values
 log "DATADIR is set to: $DATADIR"
-log "HSMBASE is set to: $HSMBASE"
+if [ "$fake_tape" = true ]; then
+  log "HSMBASE is set to: $HSMBASE"
+else
+  log "No HSMBASE given; skipping fake tape backend."
+fi
 log "PASSWD is set to: $PASSWD"
 
 
@@ -132,13 +172,18 @@ LANG_LOCALE="C.UTF-8"
 LC_ALL_LOCALE="C.UTF-8"
 log "Set correct locales for postgres dbinit"
 
-if ! grep -q "^LANG=$LANG_LOCALE" /etc/locale.conf; then
-    echo "LANG is already set to $LANG_LOCALE"
-fi
-
-if ! grep -q "^LC_ALL=$LC_ALL_LOCALE" /etc/locale.conf; then
-    echo "LC_ALL is already set to $LC_ALL_LOCALE"
-fi
+touch /etc/locale.conf
+for setting in "LANG=$LANG_LOCALE" "LC_ALL=$LC_ALL_LOCALE"; do
+    var="${setting%%=*}"
+    value="${setting#*=}"
+    if grep -q -E "^${var}=\"?${value}\"?$" /etc/locale.conf; then
+        log "$var is already set to $value"
+    else
+        log "Setting $var to $value in /etc/locale.conf"
+        sed -i "/^${var}=/d" /etc/locale.conf
+        echo "${var}=${value}" >> /etc/locale.conf
+    fi
+done
 
 # Apply the changes
 source /etc/locale.conf
@@ -264,7 +309,8 @@ sudo systemctl enable "postgresql-${pg_version}"
 sudo systemctl start  "postgresql-${pg_version}"
 
 # Modify pg_hba.conf
-cat /var/lib/pgsql/${pg_version}/data/pg_hba.conf | grep -E 'all\s+all' | sed -i 's/scram-sha-256/trust/' /var/lib/pgsql/${pg_version}/data/pg_hba.conf
+# Only the 'all all' lines; leave the replication lines alone
+sed -i -E '/all\s+all/s/scram-sha-256/trust/' "/var/lib/pgsql/${pg_version}/data/pg_hba.conf"
 
 sudo systemctl restart "postgresql-${pg_version}"
 
@@ -420,7 +466,9 @@ EOF
 log "Creating pools"
 mkdir -p "${DATADIR}"
 dcache pool create "${DATADIR}/pool-1" pool1 dCacheDomain
-dcache pool create "${DATADIR}/tapepool-1" tapepool1 dCacheDomain
+if [ "$fake_tape" = true ]; then
+  dcache pool create "${DATADIR}/tapepool-1" tapepool1 dCacheDomain
+fi
 
 
 log "Running 'dcache database update' to lay out the database structures."
@@ -432,14 +480,16 @@ chimera mkdir /home
 chimera mkdir /home/tester
 chimera chown 1000:1000 /home/tester
 # Create tape test directory
-chimera mkdir /home/tester
-chimera mkdir /home/tester/tape
-chimera chown 1000:1000 /home/tester/tape
-chimera writetag /home/tester/tape hsmType osm
-chimera writetag /home/tester/tape OSMTemplate 'StoreName generic'
-chimera writetag /home/tester/tape sGroup tape
-chimera writetag /home/tester/tape AccessLatency NEARLINE
-chimera writetag /home/tester/tape RetentionPolicy CUSTODIAL
+if [ "$fake_tape" = true ]; then
+  chimera mkdir /home/tester
+  chimera mkdir /home/tester/tape
+  chimera chown 1000:1000 /home/tester/tape
+  chimera writetag /home/tester/tape hsmType osm
+  chimera writetag /home/tester/tape OSMTemplate 'StoreName generic'
+  chimera writetag /home/tester/tape sGroup tape
+  chimera writetag /home/tester/tape AccessLatency NEARLINE
+  chimera writetag /home/tester/tape RetentionPolicy CUSTODIAL
+fi
 
 
 log "Starting dCache..."
@@ -501,48 +551,51 @@ if [ $count -eq $max_count ]; then
     exit 1
 fi
 
-log "Preparing HSM script, for fake tape backend."
-sed -e 's@puts URI.escape("hsm://#{instance}/?store=#{store}&group=#{group}&bfid=#{pnfsid}")@puts "hsm://#{instance}/?store=#{store}&group=#{group}&bfid=#{pnfsid}"@' \
-    -i /usr/share/dcache/lib/hsmcp.rb
-chmod 755 /usr/share/dcache/lib/hsmcp.rb
+# Set up the fake tape backend (optional)
+if [ "$fake_tape" = true ]; then
+    log "Preparing HSM script, for fake tape backend."
+    sed -e 's@puts URI.escape("hsm://#{instance}/?store=#{store}&group=#{group}&bfid=#{pnfsid}")@puts "hsm://#{instance}/?store=#{store}&group=#{group}&bfid=#{pnfsid}"@' \
+        -i /usr/share/dcache/lib/hsmcp.rb
+    chmod 755 /usr/share/dcache/lib/hsmcp.rb
 
-log "Check if tapepool1 is ready"
-count=0
-while [ $count -lt $max_count ]; do
-    if dcache-admin tapepool1 info 2>&1 | grep -q "State : OPEN"; then
-        log "tapepool1 ready."
-        break
-    else
-        sleep 1
-       ((count++))
+    log "Check if tapepool1 is ready"
+    count=0
+    while [ $count -lt $max_count ]; do
+        if dcache-admin tapepool1 info 2>&1 | grep -q "State : OPEN"; then
+            log "tapepool1 ready."
+            break
+        else
+            sleep 1
+           ((count++))
+        fi
+    done
+    if [ $count -eq $max_count ]; then
+        log "Tapepool1 seems to having issues. Exit"
+        exit 1
     fi
-done
-if [ $count -eq $max_count ]; then
-    log "Tapepool1 seems to having issues. Exit"
-    exit 1
+    log "Configuring tape pool"
+    dcache-admin "tapepool1" "hsm create -command=/usr/share/dcache/lib/hsmcp.rb -pnfs=/pnfs -hsmBase=${HSMBASE} -hsmInstance=osm -c:puts=1 -c:gets=1 -c:removes=1 osm"
+    # Pool configuration should be saved! Otherwise it vanishes after a restart.
+    dcache-admin "tapepool1" "save"
+
+    log "Preparing 'tape' directory"
+    chown dcache "$HSMBASE"
+    chmod 770 "$HSMBASE"
+
+    # Configure the tape pool in the PoolManager.
+    dcache-admin PoolManager "psu create unit -store generic:tape@osm"
+    dcache-admin PoolManager "psu create ugroup tape-ugroup"
+    dcache-admin PoolManager "psu addto ugroup tape-ugroup generic:tape@osm"
+    dcache-admin PoolManager "psu create pgroup tape-pools"
+    dcache-admin PoolManager "psu removefrom pgroup default tapepool1"
+    dcache-admin PoolManager "psu addto pgroup tape-pools tapepool1"
+    dcache-admin PoolManager "psu create link tape-link any-protocol tape-ugroup world-net"
+    dcache-admin PoolManager "psu set link tape-link -readpref=10 -writepref=10 -cachepref=10 -p2ppref=-1"
+    dcache-admin PoolManager "psu addto link tape-link tape-pools"
+    # dCache versions 9 and older need this setting
+    dcache-admin PoolManager "pm set -stage-allowed=yes"
+    # In the PoolManager, we don't need to save changes: they are saved into Zookeeper.
 fi
-log "Configuring tape pool"
-dcache-admin "tapepool1" "hsm create -command=/usr/share/dcache/lib/hsmcp.rb -pnfs=/pnfs -hsmBase=${HSMBASE} -hsmInstance=osm -c:puts=1 -c:gets=1 -c:removes=1 osm"
-# Pool configuration should be saved! Otherwise it vanishes after a restart.
-dcache-admin "tapepool1" "save"
-
-log "Preparing 'tape' directory"
-chown dcache "$HSMBASE"
-chmod 770 "$HSMBASE"
-
-# Configure the tape pool in the PoolManager.
-dcache-admin PoolManager "psu create unit -store generic:tape@osm"
-dcache-admin PoolManager "psu create ugroup tape-ugroup"
-dcache-admin PoolManager "psu addto ugroup tape-ugroup generic:tape@osm"
-dcache-admin PoolManager "psu create pgroup tape-pools"
-dcache-admin PoolManager "psu removefrom pgroup default tapepool1"
-dcache-admin PoolManager "psu addto pgroup tape-pools tapepool1"
-dcache-admin PoolManager "psu create link tape-link any-protocol tape-ugroup world-net"
-dcache-admin PoolManager "psu set link tape-link -readpref=10 -writepref=10 -cachepref=10 -p2ppref=-1"
-dcache-admin PoolManager "psu addto link tape-link tape-pools"
-# dCache versions 9 and older need this setting
-dcache-admin PoolManager "pm set -stage-allowed=yes'"
-# In the PoolManager, we don't need to save changes: they are saved into Zookeeper.
 
 #echo "Next step: write some PoolManager configuration."
 #echo "Here is the default configuration:"
@@ -567,3 +620,7 @@ echo "Getting a macaroon authentication token:"
 echo "curl -k -u tester:$PASSWD -X POST -H 'Content-Type: application/macaroon-request' -d '{ \"caveats\"  : [ \"path:/home/tester/\", \"activity:DOWNLOAD,LIST,UPLOAD,DELETE,MANAGE,READ_METADATA,UPDATE_METADATA,STAGE\" ], \"validity\" : \"PT12H\" }' --fail https://localhost:2880/"
 echo
 echo "The api is available at: https://localhost:3880/api/v1/"
+if [ "$fake_tape" = true ]; then
+    echo
+    echo "Files written to /home/tester/tape are flushed to the fake tape backend in: $HSMBASE"
+fi
