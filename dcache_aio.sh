@@ -4,14 +4,21 @@
 #
 # A script that sets up a nice simple dCache all-in-one server.
 # It creates a self-signed host certificate, but does not use that
-# (it's only needed to start the service).
+# (it's only needed to start the service). If /etc/grid-security already
+# contains hostcert.pem and hostkey.pem, those are reused instead.
+#
+# An existing /etc/dcache directory is moved as a whole to /etc/dcache.old,
+# so config files that belong together stay together. Older backups are
+# kept as /etc/dcache.old.~N~. An existing /etc/grid-security/storage-authzdb
+# is backed up the same way.
 
-# You'll need to specify two values or you will be prompted to give them.
+# You'll need to specify three values or you will be prompted to give them.
 
-# - the data directory (e.g. /home/datadir
+# - the data directory (e.g. /home/datadir)
 # - the password for the test user
+# - the fake tape backend directory (not the same as the data directory)
 
-# Tested on AlmaLinux 9.6
+# Tested on AlmaLinux 9.6 and 10
 # minimal 2 cpu and 2GB memory
 
 # Use on a test system only, at your own risk!
@@ -37,7 +44,17 @@ function show_help {
 # Wrapper logging function
 log() {
     local symbol="❱"
-    echo "$symbol $@"
+    echo "$symbol $*"
+}
+
+# Move an existing file or directory out of the way to <path>.old.
+# A previous <path>.old is kept as <path>.old.~N~.
+# --no-target-directory makes sure a directory is renamed instead of moved into an existing <path>.old.
+function backup_file {
+    if [ -e "$1" ]; then
+        log "  Existing $1 found; moving it out of the way."
+        mv --verbose --no-target-directory --backup=numbered "$1" "$1.old"
+    fi
 }
 
 # Initializing default values for variables
@@ -72,6 +89,19 @@ do
         ;;
     esac
 done
+
+# Check that we're running on EL9 or EL10 (e.g. AlmaLinux)
+# shellcheck source=/dev/null
+el_version=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
+case "$el_version" in
+    9|10)
+        log "Detected EL${el_version}"
+        ;;
+    *)
+        log "Unsupported OS version '${el_version}'. Only EL9 and EL10 (e.g. AlmaLinux 9 or 10) are supported."
+        exit 1
+        ;;
+esac
 
 # If no arguments were provided or if DATADIR or PASSWD are still empty, display help and prompt
 if [ -z "$DATADIR" ] || [ -z "$PASSWD" ]; then
@@ -141,6 +171,7 @@ if ! grep -q "^LC_ALL=$LC_ALL_LOCALE" /etc/locale.conf; then
 fi
 
 # Apply the changes
+# shellcheck source=/dev/null
 source /etc/locale.conf
 
 PAGE_URL="https://www.dcache.org/downloads/"
@@ -187,7 +218,7 @@ select PACK in "${PACKAGES[@]}"; do
     fi
 done
 dcache_rpm=$SELECTED_PACKAGE_URL
-dcache_basename=$(basename $dcache_rpm)
+dcache_basename=$(basename "$dcache_rpm")
 
 # Download RPM if the file does not yet exist
 if [ -f "$dcache_basename" ]; then
@@ -255,8 +286,11 @@ dnf install netcat -y
 # Install postgresql
 pg_version=17
 if ! rpm -qa | grep --silent postgres ; then
-    sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
-    sudo dnf -qy module disable postgresql
+    sudo dnf install -y "https://download.postgresql.org/pub/repos/yum/reporpms/EL-${el_version}-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+    # EL10 no longer has dnf modules
+    if [ "$el_version" = "9" ]; then
+        sudo dnf -qy module disable postgresql
+    fi
     sudo dnf install -y "postgresql${pg_version}-server"
 fi
 sudo "/usr/pgsql-${pg_version}/bin/postgresql-${pg_version}-setup" initdb
@@ -268,8 +302,18 @@ cat /var/lib/pgsql/${pg_version}/data/pg_hba.conf | grep -E 'all\s+all' | sed -i
 
 sudo systemctl restart "postgresql-${pg_version}"
 
+# Move an existing dCache configuration out of the way as a whole.
+# An existing dcache.conf could be dangerous. It might point to a production database elsewhere, causing damage!
+backup_file /etc/dcache
+
 # Install the dcache rpm
 dnf install "./${dcache_basename}" -y
+# If this dCache version was already installed, dnf didn't touch it,
+# so /etc/dcache is still missing. Reinstall to get the default files back.
+if [ ! -d /etc/dcache ]; then
+    log "Reinstalling dCache to restore the default /etc/dcache"
+    dnf reinstall "./${dcache_basename}" -y
+fi
 
 # Postgres configuration
 #su - postgres -c "createuser --no-superuser --no-createrole --createdb --no-password dcache"
@@ -325,21 +369,17 @@ if [ -f "$sshkey" ]; then
 else
     log "generate sshkey for root"
     ssh-keygen -t ed25519 -N "" -f $sshkey -q
-    log "add root ssh publickey: $sshkey to admin interface authorized_keys"
-    cat "${sshkey}.pub" |sed 's/root@/admin@/' >> /etc/dcache/admin/authorized_keys2
 fi
+# /etc/dcache is new, so always add the key, also when it already existed.
+log "add root ssh publickey: $sshkey to admin interface authorized_keys"
+mkdir -p /etc/dcache/admin
+sed 's/root@/admin@/' "${sshkey}.pub" >> /etc/dcache/admin/authorized_keys2
 
 log "Writing dCache configuration files."
 log "  /etc/dcache/dcache.conf"
-# dCache configuration
-if [ -f /etc/dcache/dcache.conf ]; then
-    # An existing dcache.conf could be dangerous. It might point to a production database elsewhere, causing damage!
-    log "  Existing dcache.conf found; moving it out of the way."
-    mv --verbose --backup=numbered /etc/dcache/dcache.conf /etc/dcache/dcache.conf.old
-    echo "dcache.layout=mylayout" >> /etc/dcache/dcache.conf
-fi
+echo "dcache.layout=mylayout" > /etc/dcache/dcache.conf
 
-defaultIP=$(ip -4 addr show $(ip -4 route show default | awk '{print $5}') | grep "inet " | awk '{print $2}' |cut -d "/" -f 1
+defaultIP=$(ip -4 addr show "$(ip -4 route show default | awk '{print $5}')" | grep "inet " | awk '{print $2}' |cut -d "/" -f 1
 )
 log "Default IP is: $defaultIP"
 layoutfile="/etc/dcache/layouts/mylayout.conf"
@@ -351,9 +391,13 @@ cat <<EOF >$layoutfile
 dcache.enable.space-reservation = false
 dcache.log.destination=file
 
+# Zookeeper gets its own domain, listed first, so that it is
+# started before all other services.
+[zookeeperDomain]
+[zookeeperDomain/zookeeper]
+
 [dCacheDomain]
 dcache.broker.scheme = core
-[dCacheDomain/zookeeper]
 [dCacheDomain/admin]
 [dCacheDomain/pnfsmanager]
  pnfsmanager.default-retention-policy = REPLICA
@@ -398,18 +442,26 @@ EOF
 touch /etc/dcache/ban.conf
 
 
-log "Generating self-signed host certificate..."
-mkdir -p /etc/grid-security
-touch /etc/grid-security/hostkey.pem
-touch /etc/grid-security/hostcert.pem
 mkdir -p /etc/grid-security/certificates
-openssl genrsa 2048 > /etc/grid-security/hostkey.pem
-openssl req -x509 -days 1000 -new \
-            -subj "/C=NL/ST=Amsterdam/O=SURF/OU=ODS/CN=localhost" \
-            -key /etc/grid-security/hostkey.pem \
-            -out /etc/grid-security/hostcert.pem
+if [ -s /etc/grid-security/hostcert.pem ] && [ -s /etc/grid-security/hostkey.pem ]; then
+    log "Existing host certificate and key found; reusing them."
+else
+    log "Generating self-signed host certificate..."
+    # If only one of the two exists, keep a backup of it.
+    backup_file /etc/grid-security/hostcert.pem
+    backup_file /etc/grid-security/hostkey.pem
+    (umask 077; openssl genrsa -out /etc/grid-security/hostkey.pem 2048)
+    openssl req -x509 -days 1000 -new \
+                -subj "/C=NL/ST=Amsterdam/O=SURF/OU=ODS/CN=localhost" \
+                -key /etc/grid-security/hostkey.pem \
+                -out /etc/grid-security/hostcert.pem
+fi
+# dCache runs as user dcache (created by the RPM), so give group dcache read access.
+chown root:dcache /etc/grid-security/hostkey.pem
+chmod 640 /etc/grid-security/hostkey.pem
 
 log "  /etc/grid-security/storage-authzdb"
+backup_file /etc/grid-security/storage-authzdb
 cat <<'EOF' > /etc/grid-security/storage-authzdb
 version 2.1
 
@@ -457,18 +509,13 @@ done
 log "dCache is running"
 
 log "Waiting for admin interface to start"
-count=0
 max_count=60
-false
-while [ "$?" -ne "0" ]; do
-    if nc -z localhost 22224 -w 1
-    then
+for ((count=0; count<max_count; count++)); do
+    if nc -z localhost 22224 -w 1; then
         log "Admin interface ready."
         break
-    else
-        sleep 1
-       ((count++))
     fi
+    sleep 1
 done
 
 if [ $count -eq $max_count ]; then

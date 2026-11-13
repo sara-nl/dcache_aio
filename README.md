@@ -15,7 +15,7 @@ Features:
 - Installs PostgreSQL and dCache.
 - Configures PostgreSQL for dCache.
 - Sets up firewall rules.
-- Generates a self-signed certificate.
+- Generates a self-signed host certificate, unless `/etc/grid-security/hostcert.pem` and `hostkey.pem` already exist; an existing pair is reused.
 - Sets up a webdav door with https
 - Sets up a frontend/api door with https
 - Supports interactive mode for input if parameters aren't provided.
@@ -26,8 +26,13 @@ You'll need to specify three values or you will be prompted to give them.
 - the password for the test user. Username is already set to "tester".
 - location for the fake tape backend: Files which are set to be transfered to tape by the hsm script will be stored here.
 
-Tested on AlmaLinux 9.6<br>
+Tested on AlmaLinux 9.6 and 10<br>
 minimal 2 cpu and 2GB memory
+
+An existing `/etc/dcache` directory is moved as a whole to `/etc/dcache.old`, so config
+files that belong together stay together. Older backups are kept as `/etc/dcache.old.~1~`,
+`/etc/dcache.old.~2~`, etc. An existing `/etc/grid-security/storage-authzdb` is backed up
+the same way.
 
 ❢ DON'T RUN THIS ON A PRODUCTION SERVER!<br>
 ❢ Use on a test system only, at your own risk!
