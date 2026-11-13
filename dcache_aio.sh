@@ -51,15 +51,12 @@ do
     case $arg in
         --datadir=*)
         DATADIR="${arg#*=}"
-        shift
         ;;
         --hsmbase=*)
         HSMBASE="${arg#*=}"
-        shift
         ;;
         --passwd=*)
         PASSWD="${arg#*=}"
-        shift
         ;;
         --help|-h)
         show_help
@@ -103,7 +100,7 @@ done
 while [ -z "$HSMBASE" ] || [ ! -d "$HSMBASE" ] || [ "$HSMBASE" == "$DATADIR" ] ; do
   read -r -p "Enter HSMBASE (must be an existing directory, not the same as DATADIR): " HSMBASE
   if [ -z "$HSMBASE" ]; then
-    echo "DATADIR cannot be empty."
+    echo "HSMBASE cannot be empty."
   elif [ ! -d "$HSMBASE" ]; then
     echo "Directory '$HSMBASE' does not exist."
   elif [ "$HSMBASE" == "$DATADIR" ]; then
@@ -113,7 +110,7 @@ done
 
 # Prompt for PASSWD until it's not empty
 while [ -z "$PASSWD" ]; do
-  read -rp "Enter PASSWD (cannot be empty): " PASSWD
+  read -rsp "Enter PASSWD (cannot be empty): " PASSWD
   echo  # for newline
   if [ -z "$PASSWD" ]; then
     echo "PASSWD cannot be empty."
@@ -132,13 +129,18 @@ LANG_LOCALE="C.UTF-8"
 LC_ALL_LOCALE="C.UTF-8"
 log "Set correct locales for postgres dbinit"
 
-if ! grep -q "^LANG=$LANG_LOCALE" /etc/locale.conf; then
-    echo "LANG is already set to $LANG_LOCALE"
-fi
-
-if ! grep -q "^LC_ALL=$LC_ALL_LOCALE" /etc/locale.conf; then
-    echo "LC_ALL is already set to $LC_ALL_LOCALE"
-fi
+touch /etc/locale.conf
+for setting in "LANG=$LANG_LOCALE" "LC_ALL=$LC_ALL_LOCALE"; do
+    var="${setting%%=*}"
+    value="${setting#*=}"
+    if grep -q -E "^${var}=\"?${value}\"?$" /etc/locale.conf; then
+        log "$var is already set to $value"
+    else
+        log "Setting $var to $value in /etc/locale.conf"
+        sed -i "/^${var}=/d" /etc/locale.conf
+        echo "${var}=${value}" >> /etc/locale.conf
+    fi
+done
 
 # Apply the changes
 source /etc/locale.conf
@@ -264,7 +266,8 @@ sudo systemctl enable "postgresql-${pg_version}"
 sudo systemctl start  "postgresql-${pg_version}"
 
 # Modify pg_hba.conf
-cat /var/lib/pgsql/${pg_version}/data/pg_hba.conf | grep -E 'all\s+all' | sed -i 's/scram-sha-256/trust/' /var/lib/pgsql/${pg_version}/data/pg_hba.conf
+# Only the 'all all' lines; leave the replication lines alone
+sed -i -E '/all\s+all/s/scram-sha-256/trust/' "/var/lib/pgsql/${pg_version}/data/pg_hba.conf"
 
 sudo systemctl restart "postgresql-${pg_version}"
 
@@ -541,7 +544,7 @@ dcache-admin PoolManager "psu create link tape-link any-protocol tape-ugroup wor
 dcache-admin PoolManager "psu set link tape-link -readpref=10 -writepref=10 -cachepref=10 -p2ppref=-1"
 dcache-admin PoolManager "psu addto link tape-link tape-pools"
 # dCache versions 9 and older need this setting
-dcache-admin PoolManager "pm set -stage-allowed=yes'"
+dcache-admin PoolManager "pm set -stage-allowed=yes"
 # In the PoolManager, we don't need to save changes: they are saved into Zookeeper.
 
 #echo "Next step: write some PoolManager configuration."
